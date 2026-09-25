@@ -1,10 +1,11 @@
 import os
 import time
+
 import psycopg2
 import requests
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from dotenv import load_dotenv
 
 # Cargar las variables de entorno desde el archivo .env
 load_dotenv()
@@ -114,7 +115,7 @@ def clasificar_commit(payload: CommitRequest):
             else:
                 salida = "error-ollama"
         except Exception as e:
-            salida = f"error-conexion: {str(e)}"
+            salida = f"error-conexion: {e!s}"
 
         latencia_ms = int((time.time() - inicio) * 1000)
         
