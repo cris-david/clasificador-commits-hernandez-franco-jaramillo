@@ -43,13 +43,20 @@ jobs:
       - name: Verificar calidad de código con Ruff
         run: ruff check app/
 
+      - name: Inicializar base de datos (Crear tablas y roles)
+        run: |
+          # Esperar a que postgres esté listo y ejecutar el init.sql
+          PGPASSWORD=claveAdmin123 psql -h localhost -U postgres -d iadb -f db/init.sql
+        env:
+          PGPASSWORD: claveAdmin123
+
       - name: Ejecutar pruebas automatizadas con Pytest
         env:
           DB_HOST: localhost
           DB_PORT: 5432
           DB_NAME: iadb
-          DB_USER: postgres
-          DB_PASSWORD: claveAdmin123
+          DB_USER: app_ia
+          DB_PASSWORD: claveApp456
           MOTOR_POR_DEFECTO: eco
         run: |
           python3 -m pytest -v
