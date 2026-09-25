@@ -1,0 +1,55 @@
+name: CI del Clasificador de Commits
+
+on:
+  push:
+    branches: [ "main", "feat/*" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test-y-calidad:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: iadb
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: claveAdmin123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Copiar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest httpx ruff
+
+      - name: Verificar calidad de código con Ruff
+        run: ruff check app/
+
+      - name: Ejecutar pruebas automatizadas con Pytest
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_NAME: iadb
+          DB_USER: app_ia
+          DB_PASSWORD: claveApp456
+          MOTOR_POR_DEFECTO: eco
+        run: |
+          python3 -m pytest -v
