@@ -20,7 +20,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U postgres -d iadb"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -48,8 +48,8 @@ jobs:
           DB_HOST: localhost
           DB_PORT: 5432
           DB_NAME: iadb
-          DB_USER: app_ia
-          DB_PASSWORD: claveApp456
+          DB_USER: postgres
+          DB_PASSWORD: claveAdmin123
           MOTOR_POR_DEFECTO: eco
         run: |
           python3 -m pytest -v
