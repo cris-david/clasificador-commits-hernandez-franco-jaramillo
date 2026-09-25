@@ -1,164 +1,135 @@
+"""API REST del clasificador de mensajes de commit."""
 import os
+import re
 import time
 import psycopg2
 import requests
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from dotenv import load_dotenv
 
-# Cargar las variables de entorno desde el archivo .env
 load_dotenv()
 
-app = FastAPI(
-    title="API Clasificador de Commits",
-    version="1.0.0",
-    description="API de producción para clasificar mensajes de commit usando reglas locales u Ollama, registrando en PostgreSQL."
-)
+app = FastAPI(title="Clasificador de commits", version="1.0.0")
 
-# Configuración de variables de entorno
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "5432")
-DB_NAME = os.getenv("DB_NAME", "iadb")
-DB_USER = os.getenv("DB_USER", "app_ia")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "claveApp456")
+TIPOS = ["feat", "fix", "docs", "test", "chore", "refactor"]
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
-MODELO_OLLAMA = os.getenv("MODELO_OLLAMA", "gemma3:270m")
-MOTOR_POR_DEFECTO = os.getenv("MOTOR_POR_DEFECTO", "eco")
+REGLAS = {
+    "fix": r"\b(fix|corrig|arregl|error|bug|falla)",
+    "docs": r"\b(doc|readme|manual|coment)",
+    "test": r"\b(test|prueba|pytest|cobertura)",
+    "chore": r"\b(actualiz|dependenc|version|limpi|config)",
+    "refactor": r"\b(refactor|reorganiz|renombr|simplific)",
+    "feat": r"\b(agreg|add|nuev|implement|crear|feature)",
+}
 
-# Estructura de los datos de entrada (Payload)
-class CommitRequest(BaseModel):
-    mensaje: str
-    motor: str = MOTOR_POR_DEFECTO
+def conexion():
+    """Abre una conexion a PostgreSQL usando las variables de entorno."""
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST"),
+        port=os.getenv("DB_PORT"),
+        dbname=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+    )
 
-# Función para registrar la inferencia en PostgreSQL usando el rol de privilegios mínimos
-def registrar_en_db(motor: str, modelo: str, entrada: str, salida: str, latencia_ms: int):
-    try:
-        conexion = psycopg2.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            database=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD
+def registrar(motor, modelo, entrada, salida, latencia_ms):
+    """Guarda la inferencia en la base de datos."""
+    with conexion() as con, con.cursor() as cur:
+        cur.execute(
+            "INSERT INTO inferencias (motor, modelo, entrada, salida, latencia_ms) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (motor, modelo, entrada, salida, int(latencia_ms)),
         )
-        cursor = conexion.cursor()
-        query = """
-            INSERT INTO inferencias (motor, modelo, entrada, salida, latencia_ms)
-            VALUES (%s, %s, %s, %s, %s)
-        """
-        cursor.execute(query, (motor, modelo, entrada, salida, latencia_ms))
-        conexion.commit()
-        cursor.close()
-        conexion.close()
-    except Exception as e:
-        print(f"Error al registrar en la base de datos: {e}")
 
-# Endpoint de comprobación de salud del sistema
+def clasificar_eco(texto: str) -> str:
+    """Motor por reglas: linea base sin modelo, no consume memoria."""
+    minusculas = texto.lower()
+    for tipo, patron in REGLAS.items():
+        if re.search(patron, minusculas):
+            return tipo
+    return "chore"
+
+def clasificar_ollama(texto: str) -> str:
+    """Motor con el modelo de lenguaje local."""
+    prompt = (
+        "Clasifica el siguiente mensaje de commit en UNA de estas categorias: "
+        + ", ".join(TIPOS)
+        + ". Responde unicamente con la palabra de la categoria, sin explicaciones.\n"
+        + f"Mensaje: {texto}\nCategoria:"
+    )
+    try:
+        respuesta = requests.post(
+            os.getenv("OLLAMA_URL"),
+            json={
+                "model": os.getenv("MODELO_OLLAMA"),
+                "prompt": prompt,
+                "stream": False,
+                "options": {"num_ctx": 1024, "num_predict": 8, "temperature": 0},
+            },
+            timeout=300,
+        )
+        respuesta.raise_for_status()
+        texto_salida = respuesta.json()["response"].strip().lower()
+        for tipo in TIPOS:
+            if tipo in texto_salida:
+                return tipo
+        return "desconocido"
+    except Exception as e:
+        return f"error-conexion: {e!s}"
+
+class Peticion(BaseModel):
+    texto: str
+    motor: str | None = None
+
 @app.get("/health")
-def health_check():
+def health():
+    """Indica si el servicio y la base de datos estan disponibles."""
+    try:
+        with conexion() as con, con.cursor() as cur:
+            cur.execute("SELECT 1")
+        return {"status": "ok", "base_datos": "ok"}
+    except Exception:
+        raise HTTPException(status_code=503, detail="Base de datos no disponible")
+
+@app.post("/clasificar")
+def clasificar(p: Peticion):
+    """Clasifica un mensaje de commit y registra la inferencia."""
+    motor = p.motor or os.getenv("MOTOR_POR_DEFECTO", "eco")
+    inicio = time.time()
+    
+    if motor == "eco":
+        modelo = "reglas-v1"
+        salida = clasificar_eco(p.texto)
+    elif motor == "ollama":
+        modelo = os.getenv("MODELO_OLLAMA")
+        salida = clasificar_ollama(p.texto)
+    else:
+        raise HTTPException(status_code=400, detail="motor debe ser eco u ollama")
+        
+    latencia_ms = (time.time() - inicio) * 1000
+    registrar(motor, modelo, p.texto, salida, latencia_ms)
+    
     return {
-        "status": "ok",
-        "modelo": MODELO_OLLAMA,
-        "motor_por_defecto": MOTOR_POR_DEFECTO
+        "motor": motor,
+        "modelo": modelo,
+        "entrada": p.texto,
+        "tipo": salida,
+        "latencia_ms": round(latencia_ms),
     }
 
-# Endpoint principal de clasificación de commits
-@app.post("/clasificar")
-def clasificar_commit(payload: CommitRequest):
-    inicio = time.time()
-    mensaje = payload.mensaje.lower()
-    motor = payload.motor.lower()
-    salida = ""
-
-    if motor == "eco":
-        # Motor basado en reglas lógicas rápidas
-        if "fix" in mensaje or "bug" in mensaje or "arreglar" in mensaje:
-            salida = "bugfix"
-        elif "feat" in mensaje or "agregar" in mensaje or "nuevo" in mensaje:
-            salida = "feature"
-        elif "docs" in mensaje or "documentacion" in mensaje:
-            salida = "documentation"
-        else:
-            salida = "refactor"
-        
-        latencia_ms = int((time.time() - inicio) * 1000)
-        
-        # Registrar en la base de datos
-        registrar_en_db("eco", "reglas-locales", payload.mensaje, salida, latencia_ms)
-        
-        return {
-            "motor": "eco",
-            "entrada": payload.mensaje,
-            "clasificacion": salida,
-            "latencia_ms": latencia_ms
-        }
-
-    elif motor == "ollama":
-        # Motor basado en el modelo local de IA
-        prompt = f"Clasifica el siguiente mensaje de commit en una de estas categorías: bugfix, feature, documentation, refactor. Responde solo con la categoría:\n\nCommit: {payload.mensaje}"
-        
-        try:
-            respuesta_ollama = requests.post(
-                OLLAMA_URL,
-                json={
-                    "model": MODELO_OLLAMA,
-                    "prompt": prompt,
-                    "stream": False
-                },
-                timeout=30
-            )
-            
-            if respuesta_ollama.status_code == 200:
-                resultado_json = respuesta_ollama.json()
-                salida = resultado_json.get("response", "").strip()
-            else:
-                salida = "error-ollama"
-        except Exception as e:
-            salida = f"error-conexion: {str(e)}"
-
-        latencia_ms = int((time.time() - inicio) * 1000)
-        
-        # Registrar en la base de datos
-        registrar_en_db("ollama", MODELO_OLLAMA, payload.mensaje, salida, latencia_ms)
-        
-        return {
-            "motor": "ollama",
-            "modelo": MODELO_OLLAMA,
-            "entrada": payload.mensaje,
-            "clasificacion": salida,
-            "latencia_ms": latencia_ms
-        }
-    else:
-        raise HTTPException(status_code=400, detail="Motor no válido. Usa 'eco' o 'ollama'.")
-
-# Endpoint para consultar el historial de inferencias registradas
 @app.get("/inferencias")
-def obtener_inferencias():
+def inferencias(limite: int = 20):
+    """Devuelve las ultimas inferencias registradas."""
     try:
-        conexion = psycopg2.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            database=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD
-        )
-        cursor = conexion.cursor()
-        cursor.execute("SELECT id, fecha, motor, modelo, entrada, salida, latencia_ms FROM inferencias ORDER BY id DESC LIMIT 10;")
-        filas = cursor.fetchall()
-        cursor.close()
-        conexion.close()
-        
-        resultados = []
-        for fila in filas:
-            resultados.append({
-                "id": fila[0],
-                "fecha": fila[1],
-                "motor": fila[2],
-                "modelo": fila[3],
-                "entrada": fila[4],
-                "salida": fila[5],
-                "latencia_ms": fila[6]
-            })
-        return {"total": len(resultados), "inferencias": resultados}
+        with conexion() as con, con.cursor() as cur:
+            cur.execute(
+                "SELECT id, fecha, motor, modelo, entrada, salida, latencia_ms "
+                "FROM inferencias ORDER BY id DESC LIMIT %s",
+                (limite,),
+            )
+            filas = cur.fetchall()
+            columnas = ["id", "fecha", "motor", "modelo", "entrada", "salida", "latencia_ms"]
+            return [dict(zip(columnas, f)) for f in filas]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al consultar la base de datos: {e}")
