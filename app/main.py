@@ -2,11 +2,11 @@
 import os
 import re
 import time
-import psycopg2
-import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+import psycopg2
 from pydantic import BaseModel
+import requests
 
 load_dotenv()
 
@@ -75,7 +75,7 @@ def clasificar_ollama(texto: str) -> str:
             if tipo in texto_salida:
                 return tipo
         return "desconocido"
-    except Exception as e:
+    except requests.RequestException as e:
         return f"error-conexion: {e!s}"
 
 class Peticion(BaseModel):
@@ -89,7 +89,7 @@ def health():
         with conexion() as con, con.cursor() as cur:
             cur.execute("SELECT 1")
         return {"status": "ok", "base_datos": "ok"}
-    except Exception:
+    except (psycopg2.OperationalError, psycopg2.DatabaseError):
         raise HTTPException(status_code=503, detail="Base de datos no disponible")
 
 @app.post("/clasificar")
@@ -131,5 +131,5 @@ def inferencias(limite: int = 20):
             filas = cur.fetchall()
             columnas = ["id", "fecha", "motor", "modelo", "entrada", "salida", "latencia_ms"]
             return [dict(zip(columnas, f)) for f in filas]
-    except Exception as e:
+    except (psycopg2.OperationalError, psycopg2.DatabaseError) as e:
         raise HTTPException(status_code=500, detail=f"Error al consultar la base de datos: {e}")
